@@ -1,6 +1,6 @@
 import fetch from "node-fetch";
 import mammoth from "mammoth";
-import pdfParse from "pdf-parse";
+import pdf from "pdf-parse/lib/pdf-parse.js";
 import * as XLSX from "xlsx";
 import chardet from "chardet";
 import iconv from "iconv-lite";
