@@ -1,33 +1,24 @@
-// api/download_text_paginated.js
-// ESM + twarde zabezpieczenia + paginacja + "raw" bypass
-
+// ESM + limity per format + paginacja + raw=true + odświeżanie tokenu
 import fetch from "node-fetch";
 import mammoth from "mammoth";
-import pdf from "pdf-parse/lib/pdf-parse.js"; // bezpośredni entrypoint, bardziej stabilny w serverless
+import pdf from "pdf-parse/lib/pdf-parse.js";
 import * as XLSX from "xlsx";
 import chardet from "chardet";
 import iconv from "iconv-lite";
 import { htmlToText } from "html-to-text";
+import { resolveAuth } from "./_dbx_auth.js";
 
-// --- KONFIG ---
 const ALLOWED = (process.env.ALLOWED_PREFIXES || "/Warsztat Opiniowy/Wytyczne|/Warsztat Opiniowy/Skany")
-  .split("|")
-  .map(s => s.trim())
-  .filter(Boolean);
+  .split("|").map(s => s.trim()).filter(Boolean);
+const isAllowed = p => typeof p === "string" && ALLOWED.some(pref => p.startsWith(pref));
 
-// limity surowego bufora (wejście) – NIE tnij kontenerów (docx/pdf/xlsx) przed parsowaniem
 const MAX_BYTES_TEXT = 10_000_000;  // txt/md/csv/json/html
-const MAX_BYTES_DOCX = 25_000_000;
+const MAX_BYTES_DOCX = 25_000_000;  // kontenery parsujemy w całości
 const MAX_BYTES_PDF  = 25_000_000;
 const MAX_BYTES_XLSX = 25_000_000;
 
-// --- POMOCE ---
-const isAllowed = p => typeof p === "string" && ALLOWED.some(pref => p.startsWith(pref));
-const ext = (path = "") => {
-  const i = path.lastIndexOf(".");
-  return i < 0 ? "" : path.slice(i + 1).toLowerCase();
-};
 const EXT_TEXT = new Set(["txt", "md", "csv", "json", "html", "htm"]);
+const ext = (path = "") => { const i = path.lastIndexOf("."); return i < 0 ? "" : path.slice(i + 1).toLowerCase(); };
 
 const decodeBuf = (buf) => {
   const guess = chardet.detect(buf) || "UTF-8";
@@ -48,33 +39,26 @@ const splitByChars = (s, chunkSize, idx) => {
   return { chunk: s.slice(start, end), chunk_index: safeIdx, total_chunks: total };
 };
 
-const encodeCursor = (obj) => Buffer.from(JSON.stringify(obj)).toString("base64");
-const decodeCursor = (cur) => {
-  try { return JSON.parse(Buffer.from(cur, "base64").toString("utf8")); }
-  catch { return null; }
-};
+const encodeCursor = obj => Buffer.from(JSON.stringify(obj)).toString("base64");
+const decodeCursor = cur => { try { return JSON.parse(Buffer.from(cur, "base64").toString("utf8")); } catch { return null; } };
 
-// --- HANDLER ---
 export default async function handler(req, res) {
   try {
-    if (req.method !== "GET") {
-      return res.status(405).json({ error: "Method not allowed" });
-    }
+    if (req.method !== "GET") return res.status(405).json({ error: "Method not allowed" });
 
-    // Query params
     const {
       path,
       cursor,
       chunk_size = "40000",
       chunk_index = "0",
-      format = "text",        // dla xlsx: "text" -> CSV; "json" -> JSON tabel
+      format = "text",   // xlsx: "text"->CSV, "json"->JSON wierszy
       sheet,
       row_offset = "0",
       row_limit = "1000",
-      raw = "false"           // raw=true -> zwróć base64 bez parsowania (diagnostyka)
+      raw = "false"
     } = req.query || {};
 
-    // Rozkoduj cursor
+    // Cursor → parametry
     let p = path;
     let idx = parseInt(chunk_index, 10) || 0;
     let size = Math.max(1000, Math.min(parseInt(chunk_size, 10) || 40000, 150000));
@@ -98,66 +82,52 @@ export default async function handler(req, res) {
       return res.status(403).json({ error: "Path not allowed by whitelist", allowed_prefixes: ALLOWED });
     }
 
-    // Autoryzacja
-    const auth = req.headers.authorization || `Bearer ${process.env.DROPBOX_TOKEN}`;
-    if (!auth?.startsWith("Bearer ")) {
-      return res.status(401).json({ error: "Missing Bearer token (Authorization header or env DROPBOX_TOKEN)" });
-    }
+    const auth = await resolveAuth(req);
 
-    // Pobierz plik z Dropbox (binaria)
+    // Pobierz plik
     const r = await fetch("https://content.dropboxapi.com/2/files/download", {
       method: "POST",
       headers: { "Authorization": auth, "Dropbox-API-Arg": JSON.stringify({ path: p }) }
     });
-
     if (!r.ok) {
       const body = await r.text().catch(() => "");
       return res.status(502).json({ error: "Dropbox error", status: r.status, body });
     }
 
-    // Metadane z nagłówka
+    // Metadane
     let metadata = {};
     try { metadata = JSON.parse(r.headers.get("Dropbox-API-Result") || "{}"); } catch {}
 
-    // Bufor pliku
     const buf = Buffer.from(await r.arrayBuffer());
     const e = ext(p);
 
-    // Limity rozmiaru dla kontenerów (nie tniemy wejścia)
+    // Limity dla kontenerów (bez cięcia na wejściu)
     if (e === "docx" && buf.length > MAX_BYTES_DOCX) {
-      return res.status(413).json({
-        error: "DOCX too large", size_bytes: buf.length, limit_bytes: MAX_BYTES_DOCX,
-        advice: "Podziel plik na mniejsze części (≤25MB) lub skróć dokument."
-      });
+      return res.status(413).json({ error: "DOCX too large", size_bytes: buf.length, limit_bytes: MAX_BYTES_DOCX });
     }
     if (e === "pdf" && buf.length > MAX_BYTES_PDF) {
-      return res.status(413).json({
-        error: "PDF too large", size_bytes: buf.length, limit_bytes: MAX_BYTES_PDF,
-        advice: "Podziel PDF na części (≤25MB) lub wyeksportuj rozdziałami."
-      });
+      return res.status(413).json({ error: "PDF too large", size_bytes: buf.length, limit_bytes: MAX_BYTES_PDF });
     }
     if (e === "xlsx" && buf.length > MAX_BYTES_XLSX) {
-      return res.status(413).json({
-        error: "XLSX too large", size_bytes: buf.length, limit_bytes: MAX_BYTES_XLSX
-      });
+      return res.status(413).json({ error: "XLSX too large", size_bytes: buf.length, limit_bytes: MAX_BYTES_XLSX });
     }
 
-    // Bypass: raw=true -> zwróć base64 bez parsowania (diagnostyka)
+    // raw=true → bez parsowania (diagnostyka)
     const wantRaw = String(raw).toLowerCase() === "true";
     if (wantRaw) {
       return res.json({
         metadata, type: e || "unknown", encoding: "base64",
         content_base64: buf.toString("base64"),
-        note: "raw=true: ominięto parsowanie dla diagnostyki.",
+        note: "raw=true: returned base64 without parsing.",
         hard_truncated: false
       });
     }
 
-    // Tnij TYLKO proste teksty na wejściu; kontenery parsujemy w całości
+    // Tnij TYLKO proste teksty na wejściu
     const hardTrunc = (EXT_TEXT.has(e) && buf.length > MAX_BYTES_TEXT);
     const slice = hardTrunc ? buf.subarray(0, MAX_BYTES_TEXT) : buf;
 
-    // --- TEKSTY: txt/md/csv/json/html ---
+    // Teksty
     if (EXT_TEXT.has(e)) {
       let text = decodeBuf(slice);
       if (e === "html" || e === "htm") {
@@ -174,10 +144,10 @@ export default async function handler(req, res) {
       });
     }
 
-    // --- DOCX ---
+    // DOCX
     if (e === "docx") {
       try {
-        const { value } = await mammoth.extractRawText({ buffer: slice }); // slice = pełny bufor docx
+        const { value } = await mammoth.extractRawText({ buffer: slice }); // pełny bufor docx
         const text = value || "";
         const { chunk, chunk_index, total_chunks } = splitByChars(text, size, idx);
         const has_more = chunk_index < total_chunks - 1;
@@ -189,16 +159,15 @@ export default async function handler(req, res) {
           has_more, next_cursor, hard_truncated: false
         });
       } catch (err) {
-        // typowo: stary .doc, uszkodzony zip, nietypowa kompresja
         return res.json({
           metadata, type: "docx", needs_conversion: true,
-          note: `DOCX parse failed. Częste przyczyny: stary format .doc, uszkodzony plik, nietypowa kompresja. ${err?.message || ""}`.trim(),
+          note: `DOCX parse failed (maybe .doc or corrupted). ${err?.message || ""}`.trim(),
           encoding: "base64", content_base64: slice.toString("base64")
         });
       }
     }
 
-    // --- PDF (bez OCR) ---
+    // PDF (bez OCR)
     if (e === "pdf") {
       try {
         const data = Buffer.isBuffer(slice) ? slice : Buffer.from(slice);
@@ -226,7 +195,7 @@ export default async function handler(req, res) {
       }
     }
 
-    // --- XLSX → CSV/JSON, paginacja po wierszach ---
+    // XLSX → CSV/JSON w porcjach
     if (e === "xlsx") {
       try {
         const wb = XLSX.read(slice, { type: "buffer" });
@@ -247,7 +216,6 @@ export default async function handler(req, res) {
         const next_cursor = has_more ? encodeCursor({ path: p, row_offset: end, row_limit: rl, sheet: target }) : null;
 
         if (String(format).toLowerCase() === "json") {
-          // JSON tabelaryczny (kawałek)
           return res.json({
             metadata, type: "xlsx", sheet: target, sheets,
             total_rows, row_offset: start, row_limit: rl,
@@ -256,7 +224,6 @@ export default async function handler(req, res) {
           });
         }
 
-        // CSV (domyślnie)
         const csv = sliceRows.map(r => r.map(v => {
           if (v == null) return "";
           const s = String(v);
@@ -278,18 +245,15 @@ export default async function handler(req, res) {
       }
     }
 
-    // --- INNE FORMATY: sygnalizuj potrzebę konwersji/OCR ---
+    // Inne formaty – sygnalizuj konwersję
     return res.json({
       metadata, type: e || "unknown", needs_conversion: true,
-      note: "Unsupported format. Dostarcz wersję tekstową (TXT/MD), DOCX lub PDF z warstwą tekstową.",
+      note: "Unsupported format. Provide text/TXT/MD, DOCX, or PDF with text layer.",
       encoding: "base64", content_base64: slice.toString("base64")
     });
 
   } catch (e) {
     console.error("download_text_paginated error:", e);
-    return res.status(500).json({
-      error: e?.message || String(e),
-      stack: e?.stack || null
-    });
+    return res.status(500).json({ error: e?.message || String(e), stack: e?.stack || null });
   }
 }
