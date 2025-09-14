@@ -1,0 +1,15 @@
+{
+  "name": "dropbox-proxy",
+  "version": "1.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "chardet": "2.0.0",
+    "html-to-text": "9.0.5",
+    "iconv-lite": "0.6.3",
+    "mammoth": "1.6.0",
+    "node-fetch": "3.3.2",
+    "pdf-parse": "1.1.1",
+    "xlsx": "0.18.5"
+  }
+}
