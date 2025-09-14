@@ -1,8 +1,10 @@
 import fetch from "node-fetch";
+import { resolveAuth } from "./_dbx_auth.js";
 
-// Domyślne dozwolone prefiksy (możesz nadpisać env: ALLOWED_PREFIXES="/A|/B")
-const ALLOWED = (process.env.ALLOWED_PREFIXES || "/Warsztat Opiniowy/Wytyczne|/Warsztat Opiniowy/Skany").split("|");
-const isAllowed = p => ALLOWED.some(pref => p?.startsWith(pref));
+// Dozwolone prefiksy (rekurencyjnie). Możesz nadpisać ALLOWED_PREFIXES w Vercel env.
+const ALLOWED = (process.env.ALLOWED_PREFIXES || "/Warsztat Opiniowy/Wytyczne|/Warsztat Opiniowy/Skany")
+  .split("|").map(s => s.trim()).filter(Boolean);
+const isAllowed = p => typeof p === "string" && ALLOWED.some(pref => p.startsWith(pref));
 
 export default async function handler(req, res) {
   try {
@@ -10,20 +12,26 @@ export default async function handler(req, res) {
 
     const { path, recursive = false, limit = 2000 } = req.body || {};
     if (!path) return res.status(400).json({ error: "Missing body param: path" });
-    if (!isAllowed(path)) return res.status(403).json({ error: "Path not allowed", allowed_prefixes: ALLOWED });
+    if (!isAllowed(path)) {
+      return res.status(403).json({ error: "Path not allowed by whitelist", allowed_prefixes: ALLOWED });
+    }
 
-    const auth = req.headers.authorization || `Bearer ${process.env.DROPBOX_TOKEN}`;
-    if (!auth?.startsWith("Bearer ")) return res.status(401).json({ error: "Missing Bearer token" });
+    const auth = await resolveAuth(req);
 
     const r = await fetch("https://api.dropboxapi.com/2/files/list_folder", {
       method: "POST",
       headers: { "Authorization": auth, "Content-Type": "application/json" },
-      body: JSON.stringify({ path, recursive, limit })
+      body: JSON.stringify({
+        path,
+        recursive: Boolean(recursive),
+        limit: Math.max(1, Math.min(parseInt(limit, 10) || 2000, 2000))
+      })
     });
 
     const json = await r.json().catch(() => ({}));
     return res.status(r.ok ? 200 : r.status).json(json);
   } catch (e) {
-    return res.status(500).json({ error: e.message || String(e) });
+    console.error("list_folder error:", e);
+    return res.status(500).json({ error: e?.message || String(e) });
   }
 }
