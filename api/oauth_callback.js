@@ -1,24 +1,31 @@
 // api/oauth_callback.js
+// Wymiana authorization_code -> access_token + refresh_token (ESM)
+
 import fetch from "node-fetch";
+
+const REDIRECT_URI = "https://dropbox-proxy-three.vercel.app/api/oauth_callback"; // <- jeśli masz inny host, podmień
 
 export default async function handler(req, res) {
   try {
-    const { code } = req.query || {};
-    if (!code) {
-      return res.status(400).send("Missing ?code=…");
-    }
+    if (req.method !== "GET") return res.status(405).send("Method not allowed");
+
+    const { code, error, error_description } = req.query || {};
+    if (error) return res.status(400).send(`OAuth error: ${error} ${error_description || ""}`);
+    if (!code) return res.status(400).send("Missing ?code=… (wróć tu po kliknięciu 'Allow' w Dropbox)");
 
     const clientId = process.env.DBX_CLIENT_ID;
     const clientSecret = process.env.DBX_CLIENT_SECRET;
-    const redirectUri = "https://dropbox-proxy-three.vercel.app/api/oauth_callback";
+    if (!clientId || !clientSecret) {
+      return res.status(500).send("Brak DBX_CLIENT_ID / DBX_CLIENT_SECRET w env (Vercel → Settings → Environment Variables).");
+    }
 
     const body = new URLSearchParams();
     body.set("code", code);
     body.set("grant_type", "authorization_code");
     body.set("client_id", clientId);
     body.set("client_secret", clientSecret);
-    body.set("redirect_uri", redirectUri);
-    body.set("token_access_type", "offline"); // prosimy o refresh_token
+    body.set("redirect_uri", REDIRECT_URI);
+    body.set("token_access_type", "offline"); // potrzebujemy refresh_token
 
     const r = await fetch("https://api.dropboxapi.com/oauth2/token", {
       method: "POST",
@@ -28,15 +35,16 @@ export default async function handler(req, res) {
 
     const text = await r.text();
     if (!r.ok) {
-      return res.status(500).send("Token exchange failed: " + text);
+      res.setHeader("Content-Type", "text/plain; charset=UTF-8");
+      return res.status(500).send("Token exchange failed:\n" + text);
     }
 
-    // Wyświetl w przeglądarce, by łatwo skopiować refresh_token:
+    // Pokaż JSON wygodnie w przeglądarce:
     res.setHeader("Content-Type", "text/html; charset=UTF-8");
     return res.status(200).send(`
-      <h2>Dropbox OAuth OK</h2>
-      <pre>${text.replace(/</g, "&lt;")}</pre>
-      <p><b>Skopiuj 'refresh_token'</b> z powyższego JSON i wklej w Vercel → Environment Variables jako <code>DBX_REFRESH_TOKEN</code>.</p>
+      <h2>Dropbox OAuth — sukces</h2>
+      <p>Skopiuj <code>refresh_token</code> z JSON poniżej i wklej do Vercel → Settings → Environment Variables jako <b>DBX_REFRESH_TOKEN</b>.</p>
+      <pre style="white-space:pre-wrap;word-break:break-word;">${text.replace(/</g, "&lt;")}</pre>
     `);
   } catch (e) {
     return res.status(500).send("Error: " + (e?.message || String(e)));
