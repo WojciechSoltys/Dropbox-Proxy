@@ -5,5 +5,7 @@
       "runtime": "nodejs18.x"
     }
   },
-  "buildCommand": "npm install --include=dev && npx tsc --noEmit"
+  "buildCommand": "npm install --include=dev && npx tsc --noEmit",
+  "outputDirectory": null,
+  "framework": null
 }
