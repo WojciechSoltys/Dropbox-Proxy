@@ -1,6 +1,6 @@
 {
   "name": "dropbox-proxy",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
   "type": "module",
   "dependencies": {
@@ -10,6 +10,19 @@
     "mammoth": "1.6.0",
     "node-fetch": "3.3.2",
     "pdf-parse": "1.1.1",
-    "xlsx": "0.18.5"
+    "xlsx": "0.18.5",
+
+    "dropbox": "^10.34.0",
+    "next": "^14.2.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "@types/node": "^20.12.7",
+    "@types/next": "^14.0.0"
+  },
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start"
   }
 }
