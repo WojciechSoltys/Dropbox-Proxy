@@ -21,23 +21,30 @@ export default async function handler(
       refreshToken: process.env.DBX_REFRESH_TOKEN
     });
 
+    // pobranie tymczasowego linku do pliku
     const tmp = await dbx.filesGetTemporaryLink({
       path: decodeURIComponent(path as string)
     });
+
+    const metadata: any = tmp.result.metadata; // 👈 obejście typów (Dropbox zwraca dynamiczne pola)
+    const mime =
+      metadata.mime_type ||
+      metadata[".tag"] === "folder"
+        ? "application/x-directory"
+        : "application/octet-stream";
 
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     res.end(
       JSON.stringify({
-        name: tmp.result.metadata.name,
-        size: tmp.result.metadata.size,
-        mime:
-          tmp.result.metadata.mime_type ||
-          "application/octet-stream",
+        name: metadata.name,
+        size: metadata.size,
+        mime,
         temporary_link: tmp.result.link
       })
     );
   } catch (error: any) {
+    console.error("Temporary link failed:", error);
     res.statusCode = 500;
     res.setHeader("Content-Type", "application/json");
     res.end(
