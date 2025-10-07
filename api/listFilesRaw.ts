@@ -5,7 +5,11 @@ import process from "node:process";
 export default async function handler(req: IncomingMessage & { query?: any; body?: any }, res: ServerResponse & { status?: any; json?: any }) {
   try {
     const { path } = req.query;
-    const dbx = new Dropbox({ accessToken: process.env.DROPBOX_TOKEN });
+  const dbx = new Dropbox({
+  clientId: process.env.DBX_CLIENT_ID,
+  clientSecret: process.env.DBX_CLIENT_SECRET,
+  refreshToken: process.env.DBX_REFRESH_TOKEN
+});
     const files = await dbx.filesListFolder({
       path: path ? decodeURIComponent(path as string) : "",
     });
