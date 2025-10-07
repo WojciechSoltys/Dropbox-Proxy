@@ -8,7 +8,7 @@ export default async function handler(
   res: ServerResponse
 ) {
   try {
-    const { path } = req.query || {};
+    const { path, chunk_index = "0", chunk_size = "65536" } = req.query || {};
     if (!path) {
       res.statusCode = 400;
       res.setHeader("Content-Type", "application/json");
@@ -30,38 +30,42 @@ export default async function handler(
       refreshToken: process.env.DBX_REFRESH_TOKEN
     });
 
-    // Pobranie pliku
+    // Pobranie pliku z Dropboxa
     const response = await dbx.filesDownload({
       path: decodeURIComponent(path as string)
     });
     const file = (response as any).result;
-    const name = file.name;
-    const mime = file.result?.mime_type || "application/octet-stream";
 
-    // Obsługa danych binarnych (NodeBuffer lub Blob)
-    let arrayBuffer: ArrayBuffer;
-    if (file.fileBinary) {
-      arrayBuffer = file.fileBinary;
-    } else if (file.fileBlob) {
-      arrayBuffer = await file.fileBlob.arrayBuffer();
-    } else if (file.fileBinary instanceof ArrayBuffer) {
-      arrayBuffer = file.fileBinary;
-    } else {
-      throw new Error("No valid binary content returned from Dropbox");
-    }
-
-    const buffer = Buffer.from(arrayBuffer);
+    // Konwersja binariów do bufora
+    const ab =
+      file.fileBinary ??
+      (file.fileBlob ? await file.fileBlob.arrayBuffer() : undefined);
+    if (!ab) throw new Error("Brak danych binarnych w odpowiedzi Dropboxa");
+    const buffer = Buffer.from(ab);
     const base64 = buffer.toString("base64");
 
-    // Zwrócenie JSON zamiast binariów
+    // Paginacja (chunking)
+    const chunkSize = parseInt(chunk_size as string);
+    const chunkIndex = parseInt(chunk_index as string);
+    const start = chunkIndex * chunkSize;
+    const end = Math.min(start + chunkSize, base64.length);
+    const data = base64.slice(start, end);
+    const totalChunks = Math.ceil(base64.length / chunkSize);
+
+    // Zwróć JSON z metadanymi
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     res.end(
       JSON.stringify({
-        name,
-        mime,
+        name: file.name,
+        mime:
+          file.result?.mime_type ||
+          "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         size: buffer.length,
-        base64
+        chunk_index: chunkIndex,
+        chunk_size: chunkSize,
+        total_chunks: totalChunks,
+        data
       })
     );
   } catch (error) {
