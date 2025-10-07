@@ -1,5 +1,5 @@
 import { Dropbox } from "dropbox";
-import type { NextApiRequest, NextApiResponse } from "next";
+import type { IncomingMessage, ServerResponse } from "http";
 import { Buffer } from "node:buffer";
 import process from "node:process";
 
