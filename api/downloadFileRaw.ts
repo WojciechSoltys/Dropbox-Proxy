@@ -2,13 +2,14 @@ import { Dropbox } from "dropbox";
 import type { IncomingMessage, ServerResponse } from "http";
 import { Buffer } from "node:buffer";
 import process from "node:process";
+import zlib from "node:zlib";
 
 export default async function handler(
   req: IncomingMessage & { query?: any },
   res: ServerResponse
 ) {
   try {
-    const { path, chunk_index = "0", chunk_size = "65536" } = req.query || {};
+    const { path } = req.query || {};
     if (!path) {
       res.statusCode = 400;
       res.setHeader("Content-Type", "application/json");
@@ -30,55 +31,60 @@ export default async function handler(
       refreshToken: process.env.DBX_REFRESH_TOKEN
     });
 
-    // Pobranie pliku z Dropboxa
     const response = await dbx.filesDownload({
       path: decodeURIComponent(path as string)
     });
     const file = (response as any).result;
-
-    // Konwersja binariów do bufora
     const ab =
       file.fileBinary ??
       (file.fileBlob ? await file.fileBlob.arrayBuffer() : undefined);
-    if (!ab) throw new Error("Brak danych binarnych w odpowiedzi Dropboxa");
+    if (!ab) throw new Error("No binary content from Dropbox");
+
     const buffer = Buffer.from(ab);
     const base64 = buffer.toString("base64");
+    const mime =
+      file.result?.mime_type ||
+      "application/octet-stream";
+    const acceptsGzip = (req.headers["accept-encoding"] || "").includes("gzip");
+    const wantsBinary = req.headers["accept"]?.includes("application/octet-stream");
 
-    // Paginacja (chunking)
-    const chunkSize = parseInt(chunk_size as string);
-    const chunkIndex = parseInt(chunk_index as string);
-    const start = chunkIndex * chunkSize;
-    const end = Math.min(start + chunkSize, base64.length);
-    const data = base64.slice(start, end);
-    const totalChunks = Math.ceil(base64.length / chunkSize);
+    if (wantsBinary) {
+      res.statusCode = 200;
+      res.setHeader("Content-Type", mime);
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename="${encodeURIComponent(file.name)}"`
+      );
+      res.end(buffer);
+      return;
+    }
 
-    // Zwróć JSON z metadanymi
+    const json = JSON.stringify({
+      name: file.name,
+      mime,
+      size: buffer.length,
+      base64
+    });
+
+    if (acceptsGzip) {
+      const gz = zlib.gzipSync(json);
+      res.statusCode = 200;
+      res.setHeader("Content-Type", "application/json");
+      res.setHeader("Content-Encoding", "gzip");
+      res.end(gz);
+      return;
+    }
+
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
-    res.end(
-      JSON.stringify({
-        name: file.name,
-        mime:
-          file.result?.mime_type ||
-          "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        size: buffer.length,
-        chunk_index: chunkIndex,
-        chunk_size: chunkSize,
-        total_chunks: totalChunks,
-        data
-      })
-    );
-  } catch (error) {
-    console.error("Download failed:", error);
+    res.end(json);
+  } catch (error: any) {
     res.statusCode = 500;
     res.setHeader("Content-Type", "application/json");
     res.end(
       JSON.stringify({
         error: "Download failed",
-        details:
-          (error as any)?.error?.error_summary ||
-          (error as any)?.message ||
-          "Unknown error"
+        details: error?.message || "Unknown error"
       })
     );
   }
