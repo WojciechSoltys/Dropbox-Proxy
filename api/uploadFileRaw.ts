@@ -1,75 +1,54 @@
-import { Dropbox } from "dropbox";
-import type { IncomingMessage, ServerResponse } from "http";
-import { Buffer } from "node:buffer";
-import process from "node:process";
-
-export const config = {
-  api: { bodyParser: false }
-};
-
-export default async function handler(
-  req: IncomingMessage & { query?: any },
-  res: ServerResponse
-) {
+// uploadFileRaw z obsługą chunków base64
+export default async function handler(req, res) {
   try {
-    if (req.method !== "POST") {
-      res.statusCode = 405;
-      res.setHeader("Allow", "POST");
-      res.end("Method Not Allowed");
-      return;
-    }
-
-    const { path } = req.query || {};
-    if (!path) {
+    const { path, chunk_index = 0, total_chunks = 1, data } = req.body || {};
+    if (!path || !data) {
       res.statusCode = 400;
-      res.setHeader("Content-Type", "application/json");
-      res.write(JSON.stringify({ error: "Missing path parameter" }));
-      res.end();
+      res.end(JSON.stringify({ error: "Missing parameters" }));
       return;
     }
 
-    const basePath = "/Warsztat Opiniowy";
-    if (!(path as string).startsWith(basePath)) {
-      res.statusCode = 403;
-      res.setHeader("Content-Type", "application/json");
-      res.write(JSON.stringify({ error: "Access denied to this path" }));
-      res.end();
-      return;
-    }
-
-    const chunks: Uint8Array[] = [];
-    for await (const chunk of req) chunks.push(chunk as Uint8Array);
-    const buffer = Buffer.concat(chunks);
-
+    const buffer = Buffer.from(data, "base64");
     const dbx = new Dropbox({
       clientId: process.env.DBX_CLIENT_ID,
       clientSecret: process.env.DBX_CLIENT_SECRET,
       refreshToken: process.env.DBX_REFRESH_TOKEN
     });
 
-    await dbx.filesUpload({
-      path: decodeURIComponent(path as string),
-      contents: buffer,
-      mode: { ".tag": "overwrite" }
-    });
+    if (total_chunks === 1) {
+      // mały plik — normalne uploadFile
+      await dbx.filesUpload({
+        path,
+        contents: buffer,
+        mode: { ".tag": "overwrite" }
+      });
+    } else {
+      // większy plik — chunked upload
+      if (chunk_index === 0) {
+        const session = await dbx.filesUploadSessionStart({
+          contents: buffer
+        });
+        res.end(JSON.stringify({ session_id: session.result.session_id }));
+        return;
+      } else if (chunk_index < total_chunks - 1) {
+        await dbx.filesUploadSessionAppendV2({
+          cursor: { session_id: req.body.session_id, offset: chunk_index * buffer.length },
+          contents: buffer
+        });
+      } else {
+        await dbx.filesUploadSessionFinish({
+          cursor: { session_id: req.body.session_id, offset: chunk_index * buffer.length },
+          commit: { path, mode: "overwrite" },
+          contents: buffer
+        });
+      }
+    }
 
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
-    res.write(JSON.stringify({ ok: true, path }));
-    res.end();
+    res.end(JSON.stringify({ ok: true, path }));
   } catch (error) {
-    console.error("Upload failed:", error);
     res.statusCode = 500;
-    res.setHeader("Content-Type", "application/json");
-    res.write(
-      JSON.stringify({
-        error: "Upload failed",
-        details:
-          (error as any)?.error?.error_summary ||
-          (error as any)?.message ||
-          "Unknown error"
-      })
-    );
-    res.end();
+    res.end(JSON.stringify({ error: error.message }));
   }
 }
