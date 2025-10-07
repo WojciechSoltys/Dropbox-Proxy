@@ -12,8 +12,7 @@ export default async function handler(
     if (!path) {
       res.statusCode = 400;
       res.setHeader("Content-Type", "application/json");
-      res.write(JSON.stringify({ error: "Missing path parameter" }));
-      res.end();
+      res.end(JSON.stringify({ error: "Missing path parameter" }));
       return;
     }
 
@@ -21,8 +20,7 @@ export default async function handler(
     if (!(path as string).startsWith(basePath)) {
       res.statusCode = 403;
       res.setHeader("Content-Type", "application/json");
-      res.write(JSON.stringify({ error: "Access denied to this path" }));
-      res.end();
+      res.end(JSON.stringify({ error: "Access denied to this path" }));
       return;
     }
 
@@ -32,28 +30,45 @@ export default async function handler(
       refreshToken: process.env.DBX_REFRESH_TOKEN
     });
 
-    const file = await dbx.filesDownload({ path: decodeURIComponent(path as string) });
-    const fileData: any = (file as any).result;
-    const buffer = Buffer.from(
-      fileData.fileBinary ?? (await fileData.fileBlob.arrayBuffer())
-    );
+    // Pobranie pliku
+    const response = await dbx.filesDownload({
+      path: decodeURIComponent(path as string)
+    });
+    const file = (response as any).result;
+    const name = file.name;
+    const mime = file.result?.mime_type || "application/octet-stream";
 
+    // Obsługa danych binarnych (NodeBuffer lub Blob)
+    let arrayBuffer: ArrayBuffer;
+    if (file.fileBinary) {
+      arrayBuffer = file.fileBinary;
+    } else if (file.fileBlob) {
+      arrayBuffer = await file.fileBlob.arrayBuffer();
+    } else if (file.fileBinary instanceof ArrayBuffer) {
+      arrayBuffer = file.fileBinary;
+    } else {
+      throw new Error("No valid binary content returned from Dropbox");
+    }
+
+    const buffer = Buffer.from(arrayBuffer);
+    const base64 = buffer.toString("base64");
+
+    // Zwrócenie JSON zamiast binariów
     res.statusCode = 200;
-    res.setHeader(
-      "Content-Type",
-      "application/octet-stream"
+    res.setHeader("Content-Type", "application/json");
+    res.end(
+      JSON.stringify({
+        name,
+        mime,
+        size: buffer.length,
+        base64
+      })
     );
-    res.setHeader(
-      "Content-Disposition",
-      `attachment; filename="${encodeURIComponent(fileData.name)}"`
-    );
-    res.write(buffer);
-    res.end();
   } catch (error) {
     console.error("Download failed:", error);
     res.statusCode = 500;
     res.setHeader("Content-Type", "application/json");
-    res.write(
+    res.end(
       JSON.stringify({
         error: "Download failed",
         details:
@@ -62,7 +77,5 @@ export default async function handler(
           "Unknown error"
       })
     );
-    res.end();
   }
 }
-
