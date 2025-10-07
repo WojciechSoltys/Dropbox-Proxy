@@ -3,7 +3,7 @@ import type { IncomingMessage, ServerResponse } from "http";
 import { Buffer } from "node:buffer";
 import process from "node:process";
 
-export default async function handler(req: NextApiRequest, res: NextApiResponse) {
+export default async function handler(req: IncomingMessage & { query?: any; body?: any }, res: ServerResponse & { status?: any; json?: any }) {
   try {
     const { path } = req.query;
     if (!path) return res.status(400).json({ error: "Missing path parameter" });
