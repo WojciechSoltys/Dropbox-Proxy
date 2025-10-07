@@ -17,7 +17,12 @@ export default async function handler(
       return;
     }
 
-    const dbx = new Dropbox({ accessToken: process.env.DROPBOX_TOKEN });
+    const dbx = new Dropbox({
+  clientId: process.env.DBX_CLIENT_ID,
+  clientSecret: process.env.DBX_CLIENT_SECRET,
+  refreshToken: process.env.DBX_REFRESH_TOKEN
+});
+
     const file = await dbx.filesDownload({ path: decodeURIComponent(path as string) });
 
     const fileData: any = (file as any).result;
