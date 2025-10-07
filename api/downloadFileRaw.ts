@@ -17,13 +17,22 @@ export default async function handler(
       return;
     }
 
-    const dbx = new Dropbox({
-  clientId: process.env.DBX_CLIENT_ID,
-  clientSecret: process.env.DBX_CLIENT_SECRET,
-  refreshToken: process.env.DBX_REFRESH_TOKEN
-});
-    const file = await dbx.filesDownload({ path: decodeURIComponent(path as string) });
+    const basePath = "/Warsztat Opiniowy";
+    if (!(path as string).startsWith(basePath)) {
+      res.statusCode = 403;
+      res.setHeader("Content-Type", "application/json");
+      res.write(JSON.stringify({ error: "Access denied to this path" }));
+      res.end();
+      return;
+    }
 
+    const dbx = new Dropbox({
+      clientId: process.env.DBX_CLIENT_ID,
+      clientSecret: process.env.DBX_CLIENT_SECRET,
+      refreshToken: process.env.DBX_REFRESH_TOKEN
+    });
+
+    const file = await dbx.filesDownload({ path: decodeURIComponent(path as string) });
     const fileData: any = (file as any).result;
     const buffer = Buffer.from(
       fileData.fileBinary ?? (await fileData.fileBlob.arrayBuffer())
@@ -32,19 +41,28 @@ export default async function handler(
     res.statusCode = 200;
     res.setHeader(
       "Content-Type",
-      "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+      "application/octet-stream"
     );
     res.setHeader(
       "Content-Disposition",
-      `attachment; filename="${encodeURIComponent(path as string)}.docx"`
+      `attachment; filename="${encodeURIComponent(fileData.name)}"`
     );
     res.write(buffer);
     res.end();
   } catch (error) {
-    console.error(error);
+    console.error("Download failed:", error);
     res.statusCode = 500;
     res.setHeader("Content-Type", "application/json");
-    res.write(JSON.stringify({ error: "Download failed" }));
+    res.write(
+      JSON.stringify({
+        error: "Download failed",
+        details:
+          (error as any)?.error?.error_summary ||
+          (error as any)?.message ||
+          "Unknown error"
+      })
+    );
     res.end();
   }
 }
+
