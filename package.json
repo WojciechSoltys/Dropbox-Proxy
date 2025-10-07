@@ -12,13 +12,14 @@
     "pdf-parse": "1.1.1",
     "xlsx": "0.18.5",
     "dropbox": "^10.34.0"
-"devDependencies": {
-  "typescript": "^5.6.3",
-  "@types/node": "^20.12.7"
-}
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "@types/node": "^20.12.7"
+  },
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start"
+    "dev": "node --watch api",
+    "build": "npx tsc --noEmit",
+    "start": "node api"
   }
 }
