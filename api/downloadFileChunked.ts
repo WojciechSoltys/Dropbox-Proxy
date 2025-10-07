@@ -1,0 +1,76 @@
+import type { IncomingMessage, ServerResponse } from "http";
+import { Dropbox } from "dropbox";
+import { Buffer } from "node:buffer";
+import process from "node:process";
+
+export default async function handler(
+  req: IncomingMessage & { query?: any },
+  res: ServerResponse
+) {
+  try {
+    const { path, chunk_size = "65536", chunk_index = "0" } = req.query || {};
+    if (!path) {
+      res.statusCode = 400;
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({ error: "Missing path parameter" }));
+      return;
+    }
+
+    const dbx = new Dropbox({
+      clientId: process.env.DBX_CLIENT_ID,
+      clientSecret: process.env.DBX_CLIENT_SECRET,
+      refreshToken: process.env.DBX_REFRESH_TOKEN
+    });
+
+    // Pobranie pliku
+    const response = await dbx.filesDownload({
+      path: decodeURIComponent(path as string)
+    });
+    const file = (response as any).result;
+
+    // Konwersja na base64
+    const ab =
+      file.fileBinary ??
+      (file.fileBlob ? await file.fileBlob.arrayBuffer() : undefined);
+    if (!ab) throw new Error("Brak danych binarnych w odpowiedzi Dropboxa");
+    const buffer = Buffer.from(ab);
+    const base64 = buffer.toString("base64");
+
+    // Chunkowanie
+    const chunkSize = parseInt(chunk_size as string);
+    const chunkIndex = parseInt(chunk_index as string);
+    const start = chunkIndex * chunkSize;
+    const end = Math.min(start + chunkSize, base64.length);
+    const data = base64.slice(start, end);
+    const totalChunks = Math.ceil(base64.length / chunkSize);
+
+    res.statusCode = 200;
+    res.setHeader("Content-Type", "application/json");
+    res.end(
+      JSON.stringify({
+        name: file.name,
+        mime:
+          file.result?.mime_type ||
+          "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        size: buffer.length,
+        chunk_index: chunkIndex,
+        chunk_size: chunkSize,
+        total_chunks: totalChunks,
+        data
+      })
+    );
+  } catch (error: any) {
+    console.error("Chunked download failed:", error);
+    res.statusCode = 500;
+    res.setHeader("Content-Type", "application/json");
+    res.end(
+      JSON.stringify({
+        error: "Chunked download failed",
+        details:
+          error?.error?.error_summary ||
+          error?.message ||
+          "Unknown error"
+      })
+    );
+  }
+}
