@@ -4,10 +4,6 @@ import { Buffer } from "node:buffer";
 import process from "node:process";
 import zlib from "node:zlib";
 
-/**
- * Jeśli wynik po kompresji przekracza 5 MB, endpoint automatycznie
- * zapisuje gzip-base64 do pliku tymczasowego w Dropboxie i zwraca link.
- */
 export default async function handler(
   req: IncomingMessage & { query?: any },
   res: ServerResponse
@@ -16,6 +12,7 @@ export default async function handler(
     const { path, compressed = "true" } = req.query || {};
     if (!path) {
       res.statusCode = 400;
+      res.setHeader("Content-Type", "application/json");
       res.end(JSON.stringify({ error: "Missing path parameter" }));
       return;
     }
@@ -26,6 +23,33 @@ export default async function handler(
       refreshToken: process.env.DBX_REFRESH_TOKEN
     });
 
+    // 🔹 Najpierw pobierz metadane (rozmiar)
+    const meta = await dbx.filesGetMetadata({ path: decodeURIComponent(path as string) });
+    const size = (meta as any).result.size || 0;
+    const name = (meta as any).result.name;
+
+    // 🔹 Jeśli plik > 4.5 MB → od razu zwróć tymczasowy link (bez pobierania binariów)
+    if (size > 4.5 * 1024 * 1024) {
+      const tmp = await dbx.filesGetTemporaryLink({
+        path: decodeURIComponent(path as string)
+      });
+      res.statusCode = 200;
+      res.setHeader("Content-Type", "application/json");
+      res.end(
+        JSON.stringify({
+          note: "file too large for inline base64, returned temporary link instead",
+          name,
+          size,
+          mime:
+            (meta as any).result.mime_type ||
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+          temporary_link: tmp.result.link
+        })
+      );
+      return;
+    }
+
+    // 🔹 Dla mniejszych plików: pobierz, skompresuj i zwróć base64
     const response = await dbx.filesDownload({
       path: decodeURIComponent(path as string)
     });
@@ -40,46 +64,25 @@ export default async function handler(
       file.result?.mime_type ||
       "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 
-    // ─────────────────────────────────────────────
-    // 🔹 Kompresja gzip + base64
-    const gzipped = zlib.gzipSync(buffer);
-    const base64 = gzipped.toString("base64");
-
-    // Jeśli wynik przekracza 5 MB → generujemy tymczasowy plik i link
-    const limit = 5 * 1024 * 1024;
-    if (base64.length > limit * 1.33) {
-      const tmpPath = `/Warsztat Opiniowy/_temp/${file.name}.gz.b64.json`;
-      await dbx.filesUpload({
-        path: tmpPath,
-        contents: Buffer.from(
-          JSON.stringify({
-            name: file.name,
-            size: buffer.length,
-            compressed: gzipped.length,
-            mime,
-            encoding: "gzip+base64",
-            base64
-          })
-        ),
-        mode: { ".tag": "overwrite" }
-      });
-      const tmp = await dbx.filesGetTemporaryLink({ path: tmpPath });
+    if (compressed === "false") {
+      const base64 = buffer.toString("base64");
       res.statusCode = 200;
       res.setHeader("Content-Type", "application/json");
       res.end(
         JSON.stringify({
-          note: "payload too large, returned link instead",
           name: file.name,
           size: buffer.length,
           mime,
-          temporary_link: tmp.result.link
+          encoding: "base64",
+          base64
         })
       );
       return;
     }
 
-    // ─────────────────────────────────────────────
-    // 🔹 Standardowa odpowiedź gzip+base64
+    const gzipped = zlib.gzipSync(buffer);
+    const base64 = gzipped.toString("base64");
+
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     res.end(
@@ -93,6 +96,7 @@ export default async function handler(
       })
     );
   } catch (error: any) {
+    console.error("Download failed:", error);
     res.statusCode = 500;
     res.setHeader("Content-Type", "application/json");
     res.end(
