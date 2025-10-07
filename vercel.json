@@ -1,11 +1,11 @@
 {
   "version": 2,
+  "buildCommand": "npm install --include=dev && npx tsc --noEmit",
+  "outputDirectory": "public",
+  "framework": null,
   "functions": {
     "api/*.ts": {
-      "runtime": "nodejs18.x"
+      "runtime": "vercel-nodejs@18.0.0"
     }
-  },
-  "buildCommand": "npm install --include=dev && npx tsc --noEmit",
-  "outputDirectory": null,
-  "framework": null
+  }
 }
