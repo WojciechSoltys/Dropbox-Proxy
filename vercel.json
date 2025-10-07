@@ -4,8 +4,8 @@
   "outputDirectory": "public",
   "framework": null,
   "functions": {
-    "api/*.ts": {
-      "runtime": "vercel-nodejs@18.0.0"
+    "api/**/*.ts": {
+      "runtime": "nodejs18.x"
     }
   }
 }
