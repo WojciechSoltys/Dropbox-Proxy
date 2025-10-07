@@ -12,12 +12,10 @@
     "pdf-parse": "1.1.1",
     "xlsx": "0.18.5",
     "dropbox": "^10.34.0"
-  },
-  "devDependencies": {
-    "typescript": "^5.6.3",
-    "@types/node": "^20.12.7",
-    "@types/next": "^14.0.0"
-  },
+"devDependencies": {
+  "typescript": "^5.6.3",
+  "@types/node": "^20.12.7"
+}
   "scripts": {
     "dev": "next dev",
     "build": "next build",
