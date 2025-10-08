@@ -6,16 +6,17 @@ import zlib from "node:zlib";
 import https from "https";
 
 /**
- * Unified Dropbox Proxy
- * ---------------------
- * Tryby działania:
- *  - mode=meta   → zwraca metadane i tymczasowy link (bez pobierania binariów)
- *  - mode=stream → streamuje plik z Dropboxa (bez limitu rozmiaru)
- *  - mode=full   → zwraca cały plik w base64 lub gzip+base64
- * 
+ * /api/downloadFileProxy
+ * ----------------------
+ * Jeden uniwersalny endpoint z trzema trybami:
+ *
+ *  ?mode=meta   → Zwraca metadane i tymczasowy link Dropboxa
+ *  ?mode=stream → Strumieniuje plik z Dropboxa do klienta (bez limitu)
+ *  ?mode=full   → Zwraca pełny plik (gzip+base64 lub base64)
+ *
  * Przykłady:
  *  /api/downloadFileProxy?path=/Warsztat%20Opiniowy/...&mode=meta
- *  /api/downloadFileProxy?path=/Warsztat%20Opiniowy/...&mode=stream&link=https://dl.dropboxusercontent.com/...
+ *  /api/downloadFileProxy?path=/Warsztat%20Opiniowy/...&mode=stream
  *  /api/downloadFileProxy?path=/Warsztat%20Opiniowy/...&mode=full&compressed=true
  */
 
@@ -26,7 +27,7 @@ export default async function handler(
   try {
     const { path, mode = "full", compressed = "true", link } = req.query || {};
 
-    // 🔹 Tryb 1: meta (zwraca metadane i link tymczasowy)
+    // 🔹 Tryb 1: meta — tylko metadane i tymczasowy link Dropboxa
     if (mode === "meta") {
       if (!path) {
         res.statusCode = 400;
@@ -60,28 +61,43 @@ export default async function handler(
       return;
     }
 
-    // 🔹 Tryb 2: stream (przekierowanie do tymczasowego linku lub streamowanie)
+    // 🔹 Tryb 2: stream — serwerowe strumieniowanie pliku z Dropboxa
     if (mode === "stream") {
-      if (!link) {
+      // Jeżeli użytkownik poda link → użyj go, inaczej wygeneruj nowy
+      let downloadLink = link;
+      if (!downloadLink && path) {
+        const dbx = new Dropbox({
+          clientId: process.env.DBX_CLIENT_ID,
+          clientSecret: process.env.DBX_CLIENT_SECRET,
+          refreshToken: process.env.DBX_REFRESH_TOKEN
+        });
+        const tmp = await dbx.filesGetTemporaryLink({ path: decodeURIComponent(path as string) });
+        downloadLink = tmp.result.link;
+      }
+
+      if (!downloadLink) {
         res.statusCode = 400;
         res.setHeader("Content-Type", "application/json");
-        res.end(JSON.stringify({ error: "Missing link parameter" }));
+        res.end(JSON.stringify({ error: "Missing link or path parameter" }));
         return;
       }
 
-      https.get(link, (stream) => {
-        res.statusCode = 200;
-        res.setHeader("Content-Type", "application/octet-stream");
-        stream.pipe(res);
-      }).on("error", (err) => {
-        res.statusCode = 500;
-        res.end(JSON.stringify({ error: err.message }));
-      });
+      // Streamuj plik z Dropboxa (bezpośrednio przez Twój serwer)
+      https
+        .get(downloadLink, (stream) => {
+          res.statusCode = 200;
+          res.setHeader("Content-Type", "application/octet-stream");
+          stream.pipe(res);
+        })
+        .on("error", (err) => {
+          res.statusCode = 500;
+          res.end(JSON.stringify({ error: err.message }));
+        });
 
       return;
     }
 
-    // 🔹 Tryb 3: full (domyślny — zwraca base64 lub gzip+base64)
+    // 🔹 Tryb 3: full — zwraca cały plik gzip+base64 lub base64
     if (!path) {
       res.statusCode = 400;
       res.setHeader("Content-Type", "application/json");
@@ -95,7 +111,6 @@ export default async function handler(
       refreshToken: process.env.DBX_REFRESH_TOKEN
     });
 
-    // Pobranie pliku
     const response = await dbx.filesDownload({
       path: decodeURIComponent(path as string)
     });
@@ -104,14 +119,14 @@ export default async function handler(
       file.fileBinary ??
       (file.fileBlob ? await file.fileBlob.arrayBuffer() : undefined);
 
-    if (!ab) throw new Error("No binary content in Dropbox response");
+    if (!ab) throw new Error("No binary content from Dropbox");
 
     const buffer = Buffer.from(ab);
     const mime =
       file.result?.mime_type ||
       "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 
-    // 🔸 Opcjonalny tryb base64 bez kompresji
+    // Tryb base64 (bez kompresji)
     if (compressed === "false") {
       const base64 = buffer.toString("base64");
       res.statusCode = 200;
@@ -129,11 +144,11 @@ export default async function handler(
       return;
     }
 
-    // 🔸 Tryb kompresowany (gzip + base64)
+    // Tryb gzip+base64 (kompresowany)
     const gzipped = zlib.gzipSync(buffer);
     const base64 = gzipped.toString("base64");
 
-    // Jeśli za duży, automatycznie przechodzi do trybu meta (link)
+    // Jeśli za duży — zwróć link zamiast danych
     if (base64.length > 4.5 * 1024 * 1024) {
       const tmp = await dbx.filesGetTemporaryLink({
         path: decodeURIComponent(path as string)
@@ -153,7 +168,7 @@ export default async function handler(
       return;
     }
 
-    // Normalna odpowiedź gzip+base64
+    // Standardowa odpowiedź gzip+base64
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     res.end(
