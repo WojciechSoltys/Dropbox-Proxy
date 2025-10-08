@@ -7,17 +7,12 @@ import https from "https";
 
 /**
  * /api/downloadFileProxy
- * ----------------------
- * Jeden uniwersalny endpoint z trzema trybami:
- *
- *  ?mode=meta   → Zwraca metadane i tymczasowy link Dropboxa
- *  ?mode=stream → Strumieniuje plik z Dropboxa do klienta (bez limitu)
- *  ?mode=full   → Zwraca pełny plik (gzip+base64 lub base64)
- *
- * Przykłady:
- *  /api/downloadFileProxy?path=/Warsztat%20Opiniowy/...&mode=meta
- *  /api/downloadFileProxy?path=/Warsztat%20Opiniowy/...&mode=stream
- *  /api/downloadFileProxy?path=/Warsztat%20Opiniowy/...&mode=full&compressed=true
+ * --------------------------------------
+ * Tryby:
+ *  - mode=meta   → metadane + link Dropboxa
+ *  - mode=stream → strumieniowanie pliku z Dropboxa (bez limitu)
+ *  - mode=full   → pełny plik w formacie gzip+base64 lub base64
+ *  - mode=relay  → zwraca link proxy do lokalnego streama (dla sandboxów)
  */
 
 export default async function handler(
@@ -27,15 +22,16 @@ export default async function handler(
   try {
     const { path, mode = "full", compressed = "true", link } = req.query || {};
 
-    // 🔹 Tryb 1: meta — tylko metadane i tymczasowy link Dropboxa
-    if (mode === "meta") {
-      if (!path) {
-        res.statusCode = 400;
-        res.setHeader("Content-Type", "application/json");
-        res.end(JSON.stringify({ error: "Missing path parameter" }));
-        return;
-      }
+    // 🔹 Walidacja minimalna
+    if (!path && mode !== "stream" && mode !== "relay") {
+      res.statusCode = 400;
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({ error: "Missing path parameter" }));
+      return;
+    }
 
+    // 🔹 Tryb META
+    if (mode === "meta") {
       const dbx = new Dropbox({
         clientId: process.env.DBX_CLIENT_ID,
         clientSecret: process.env.DBX_CLIENT_SECRET,
@@ -61,30 +57,29 @@ export default async function handler(
       return;
     }
 
-    // 🔹 Tryb 2: stream — serwerowe strumieniowanie pliku z Dropboxa
+    // 🔹 Tryb STREAM
     if (mode === "stream") {
-      // Jeżeli użytkownik poda link → użyj go, inaczej wygeneruj nowy
-      let downloadLink = link;
-      if (!downloadLink && path) {
+      let streamLink = link;
+      if (!streamLink && path) {
         const dbx = new Dropbox({
           clientId: process.env.DBX_CLIENT_ID,
           clientSecret: process.env.DBX_CLIENT_SECRET,
           refreshToken: process.env.DBX_REFRESH_TOKEN
         });
         const tmp = await dbx.filesGetTemporaryLink({ path: decodeURIComponent(path as string) });
-        downloadLink = tmp.result.link;
+        streamLink = tmp.result.link;
       }
 
-      if (!downloadLink) {
+      if (!streamLink) {
         res.statusCode = 400;
         res.setHeader("Content-Type", "application/json");
-        res.end(JSON.stringify({ error: "Missing link or path parameter" }));
+        res.end(JSON.stringify({ error: "Missing link or path parameter for stream" }));
         return;
       }
 
-      // Streamuj plik z Dropboxa (bezpośrednio przez Twój serwer)
+      // proxy stream przez Twój serwer
       https
-        .get(downloadLink, (stream) => {
+        .get(streamLink, (stream) => {
           res.statusCode = 200;
           res.setHeader("Content-Type", "application/octet-stream");
           stream.pipe(res);
@@ -93,18 +88,39 @@ export default async function handler(
           res.statusCode = 500;
           res.end(JSON.stringify({ error: err.message }));
         });
-
       return;
     }
 
-    // 🔹 Tryb 3: full — zwraca cały plik gzip+base64 lub base64
-    if (!path) {
-      res.statusCode = 400;
+    // 🔹 Tryb RELAY
+    if (mode === "relay") {
+      const dbx = new Dropbox({
+        clientId: process.env.DBX_CLIENT_ID,
+        clientSecret: process.env.DBX_CLIENT_SECRET,
+        refreshToken: process.env.DBX_REFRESH_TOKEN
+      });
+
+      const tmp = await dbx.filesGetTemporaryLink({ path: decodeURIComponent(path as string) });
+
+      const relayUrl = `${process.env.API_BASE_URL || "https://dropbox-proxy-three.vercel.app/api"}/downloadFileProxy?mode=stream&link=${encodeURIComponent(tmp.result.link)}`;
+
+      res.statusCode = 200;
       res.setHeader("Content-Type", "application/json");
-      res.end(JSON.stringify({ error: "Missing path parameter" }));
+      res.end(
+        JSON.stringify({
+          mode,
+          note: "Relay link generated. Use this link to stream the file without sandbox limits.",
+          name: tmp.result.metadata.name,
+          size: tmp.result.metadata.size,
+          mime:
+            tmp.result.metadata.mime_type ||
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+          relay_link: relayUrl
+        })
+      );
       return;
     }
 
+    // 🔹 Tryb FULL
     const dbx = new Dropbox({
       clientId: process.env.DBX_CLIENT_ID,
       clientSecret: process.env.DBX_CLIENT_SECRET,
@@ -119,14 +135,13 @@ export default async function handler(
       file.fileBinary ??
       (file.fileBlob ? await file.fileBlob.arrayBuffer() : undefined);
 
-    if (!ab) throw new Error("No binary content from Dropbox");
+    if (!ab) throw new Error("No binary content in Dropbox response");
 
     const buffer = Buffer.from(ab);
     const mime =
       file.result?.mime_type ||
       "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 
-    // Tryb base64 (bez kompresji)
     if (compressed === "false") {
       const base64 = buffer.toString("base64");
       res.statusCode = 200;
@@ -144,11 +159,10 @@ export default async function handler(
       return;
     }
 
-    // Tryb gzip+base64 (kompresowany)
+    // 🔹 gzip + base64
     const gzipped = zlib.gzipSync(buffer);
     const base64 = gzipped.toString("base64");
 
-    // Jeśli za duży — zwróć link zamiast danych
     if (base64.length > 4.5 * 1024 * 1024) {
       const tmp = await dbx.filesGetTemporaryLink({
         path: decodeURIComponent(path as string)
@@ -157,18 +171,17 @@ export default async function handler(
       res.setHeader("Content-Type", "application/json");
       res.end(
         JSON.stringify({
-          note: "file too large, returning link instead",
-          mode: "meta",
+          note: "File too large for inline base64, returning relay link instead.",
+          mode: "relay",
+          relay_link: `${process.env.API_BASE_URL || "https://dropbox-proxy-three.vercel.app/api"}/downloadFileProxy?mode=stream&link=${encodeURIComponent(tmp.result.link)}`,
           name: file.name,
           size: buffer.length,
-          mime,
-          temporary_link: tmp.result.link
+          mime
         })
       );
       return;
     }
 
-    // Standardowa odpowiedź gzip+base64
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     res.end(
