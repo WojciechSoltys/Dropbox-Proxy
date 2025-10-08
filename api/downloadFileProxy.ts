@@ -56,6 +56,42 @@ export default async function handler(
       );
       return;
     }
+// 🔹 Tryb RELAY — tylko JSON, żadnych binariów
+if (mode === "relay") {
+  if (!path) {
+    res.statusCode = 400;
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Missing path parameter" }));
+    return;
+  }
+
+  const dbx = new Dropbox({
+    clientId: process.env.DBX_CLIENT_ID,
+    clientSecret: process.env.DBX_CLIENT_SECRET,
+    refreshToken: process.env.DBX_REFRESH_TOKEN
+  });
+
+  const tmp = await dbx.filesGetTemporaryLink({ path: decodeURIComponent(path as string) });
+
+  const relayUrl = `${process.env.API_BASE_URL || "https://dropbox-proxy-three.vercel.app/api"}/downloadFileProxy?mode=stream&link=${encodeURIComponent(tmp.result.link)}`;
+
+  // 👇 TYLKO JSON – żadnych base64 ani binariów
+  res.statusCode = 200;
+  res.setHeader("Content-Type", "application/json");
+  res.end(
+    JSON.stringify({
+      mode: "relay",
+      note: "relay link generated — use this link to stream file without sandbox limit",
+      name: tmp.result.metadata.name,
+      size: tmp.result.metadata.size,
+      mime:
+        tmp.result.metadata.mime_type ||
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      relay_link: relayUrl
+    })
+  );
+  return;
+}
 
     // 🔹 Tryb STREAM
     if (mode === "stream") {
