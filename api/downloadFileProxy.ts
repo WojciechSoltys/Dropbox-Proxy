@@ -7,12 +7,12 @@ import https from "https";
 
 /**
  * /api/downloadFileProxy
- * --------------------------------------
+ * ------------------------------------------------
  * Tryby:
  *  - mode=meta   → metadane + link Dropboxa
  *  - mode=stream → strumieniowanie pliku z Dropboxa (bez limitu)
- *  - mode=full   → pełny plik w formacie gzip+base64 lub base64
- *  - mode=relay  → zwraca link proxy do lokalnego streama (dla sandboxów)
+ *  - mode=full   → pełny plik (gzip+base64 lub base64)
+ *  - mode=relay  → zwraca link proxy (dla sandboxów)
  */
 
 export default async function handler(
@@ -22,7 +22,20 @@ export default async function handler(
   try {
     const { path, mode = "full", compressed = "true", link } = req.query || {};
 
-    // 🔹 Walidacja minimalna
+    // Ustawienia wspólne nagłówków
+    res.setHeader("Cache-Control", "no-store");
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+
+    // Obsługa preflight OPTIONS
+    if (req.method === "OPTIONS") {
+      res.statusCode = 204;
+      res.end();
+      return;
+    }
+
+    // 🔹 Walidacja podstawowa
     if (!path && mode !== "stream" && mode !== "relay") {
       res.statusCode = 400;
       res.setHeader("Content-Type", "application/json");
@@ -56,42 +69,6 @@ export default async function handler(
       );
       return;
     }
-// 🔹 Tryb RELAY — tylko JSON, żadnych binariów
-if (mode === "relay") {
-  if (!path) {
-    res.statusCode = 400;
-    res.setHeader("Content-Type", "application/json");
-    res.end(JSON.stringify({ error: "Missing path parameter" }));
-    return;
-  }
-
-  const dbx = new Dropbox({
-    clientId: process.env.DBX_CLIENT_ID,
-    clientSecret: process.env.DBX_CLIENT_SECRET,
-    refreshToken: process.env.DBX_REFRESH_TOKEN
-  });
-
-  const tmp = await dbx.filesGetTemporaryLink({ path: decodeURIComponent(path as string) });
-
-  const relayUrl = `${process.env.API_BASE_URL || "https://dropbox-proxy-three.vercel.app/api"}/downloadFileProxy?mode=stream&link=${encodeURIComponent(tmp.result.link)}`;
-
-  // 👇 TYLKO JSON – żadnych base64 ani binariów
-  res.statusCode = 200;
-  res.setHeader("Content-Type", "application/json");
-  res.end(
-    JSON.stringify({
-      mode: "relay",
-      note: "relay link generated — use this link to stream file without sandbox limit",
-      name: tmp.result.metadata.name,
-      size: tmp.result.metadata.size,
-      mime:
-        tmp.result.metadata.mime_type ||
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-      relay_link: relayUrl
-    })
-  );
-  return;
-}
 
     // 🔹 Tryb STREAM
     if (mode === "stream") {
@@ -113,15 +90,16 @@ if (mode === "relay") {
         return;
       }
 
-      // proxy stream przez Twój serwer
       https
         .get(streamLink, (stream) => {
           res.statusCode = 200;
           res.setHeader("Content-Type", "application/octet-stream");
+          res.setHeader("Cache-Control", "no-store");
           stream.pipe(res);
         })
         .on("error", (err) => {
           res.statusCode = 500;
+          res.setHeader("Content-Type", "application/json");
           res.end(JSON.stringify({ error: err.message }));
         });
       return;
@@ -143,12 +121,12 @@ if (mode === "relay") {
       res.setHeader("Content-Type", "application/json");
       res.end(
         JSON.stringify({
-          mode,
-          note: "Relay link generated. Use this link to stream the file without sandbox limits.",
+          mode: "relay",
+          note: "relay link generated — use this link to stream file without sandbox limit",
           name: tmp.result.metadata.name,
           size: tmp.result.metadata.size,
           mime:
-            tmp.result.metadata.mime_type ||
+            (tmp.result.metadata as any).mime_type ||
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
           relay_link: relayUrl
         })
@@ -175,7 +153,7 @@ if (mode === "relay") {
 
     const buffer = Buffer.from(ab);
     const mime =
-      file.result?.mime_type ||
+      (file.result as any)?.mime_type ||
       "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 
     if (compressed === "false") {
@@ -195,7 +173,6 @@ if (mode === "relay") {
       return;
     }
 
-    // 🔹 gzip + base64
     const gzipped = zlib.gzipSync(buffer);
     const base64 = gzipped.toString("base64");
 
@@ -234,6 +211,7 @@ if (mode === "relay") {
   } catch (error: any) {
     console.error("Download failed:", error);
     res.statusCode = 500;
+    res.setHeader("Cache-Control", "no-store");
     res.setHeader("Content-Type", "application/json");
     res.end(
       JSON.stringify({
