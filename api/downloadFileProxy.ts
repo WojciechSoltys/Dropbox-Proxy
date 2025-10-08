@@ -9,10 +9,11 @@ import https from "https";
  * /api/downloadFileProxy
  * ------------------------------------------------
  * Tryby:
- *  - mode=meta   → metadane + link Dropboxa
- *  - mode=stream → strumieniowanie pliku z Dropboxa (bez limitu)
- *  - mode=full   → pełny plik (gzip+base64 lub base64)
- *  - mode=relay  → zwraca link proxy (dla sandboxów)
+ *  - mode=meta        → metadane + link Dropboxa
+ *  - mode=stream      → strumieniowanie pliku (bez limitu)
+ *  - mode=full        → pełny plik (gzip+base64 lub base64)
+ *  - mode=relay       → zwraca link proxy (dla sandboxów)
+ *  - mode=jsonBase64  → zwraca cały plik jako JSON (base64) – używane przez sandbox
  */
 
 export default async function handler(
@@ -22,20 +23,18 @@ export default async function handler(
   try {
     const { path, mode = "full", compressed = "true", link } = req.query || {};
 
-    // Ustawienia wspólne nagłówków
+    // Uniwersalne nagłówki
     res.setHeader("Cache-Control", "no-store");
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
-    // Obsługa preflight OPTIONS
     if (req.method === "OPTIONS") {
       res.statusCode = 204;
       res.end();
       return;
     }
 
-    // 🔹 Walidacja podstawowa
     if (!path && mode !== "stream" && mode !== "relay") {
       res.statusCode = 400;
       res.setHeader("Content-Type", "application/json");
@@ -99,7 +98,6 @@ export default async function handler(
         })
         .on("error", (err) => {
           res.statusCode = 500;
-          res.setHeader("Content-Type", "application/json");
           res.end(JSON.stringify({ error: err.message }));
         });
       return;
@@ -129,6 +127,38 @@ export default async function handler(
             (tmp.result.metadata as any).mime_type ||
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
           relay_link: relayUrl
+        })
+      );
+      return;
+    }
+
+    // 🔹 Tryb JSON_BASE64
+    if (mode === "jsonBase64") {
+      const dbx = new Dropbox({
+        clientId: process.env.DBX_CLIENT_ID,
+        clientSecret: process.env.DBX_CLIENT_SECRET,
+        refreshToken: process.env.DBX_REFRESH_TOKEN
+      });
+
+      const response = await dbx.filesDownload({ path: decodeURIComponent(path as string) });
+      const file = (response as any).result;
+      const ab =
+        file.fileBinary ??
+        (file.fileBlob ? await file.fileBlob.arrayBuffer() : undefined);
+      const buffer = Buffer.from(ab);
+
+      res.statusCode = 200;
+      res.setHeader("Content-Type", "application/json");
+      res.setHeader("Cache-Control", "no-store");
+      res.end(
+        JSON.stringify({
+          mode,
+          name: file.name,
+          size: buffer.length,
+          mime:
+            (file.result as any)?.mime_type ||
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+          base64: buffer.toString("base64")
         })
       );
       return;
